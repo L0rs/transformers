@@ -2204,7 +2204,11 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         model,
         unconditional_ids: Optional[torch.LongTensor] = None,
         unconditional_attention_mask: Optional[torch.LongTensor] = None,
+        safety_ids: Optional[torch.LongTensor] = None,
+        safety_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
+        sld_threshold: float = 0.2,  # Introduce threshold for safety guidance
+        sld_guidance_decay: float = 0.95  # Gradually decay safety guidance
     ):
         self.guidance_scale = guidance_scale
         self.model = model
@@ -2215,6 +2219,15 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             "past_key_values": None,
             "first_pass": True,
         }
+        self.safety_context = {
+            "input_ids": safety_ids,
+            "attention_mask": safety_attention_mask,
+            "use_cache": use_cache,
+            "past_key_values": None,
+            "first_pass": True,
+        }
+        self.sld_threshold = sld_threshold
+        self.sld_guidance_decay = sld_guidance_decay  # Introduce decay factor
 
     def get_unconditional_logits(self, input_ids):
         if self.unconditional_context["first_pass"]:
@@ -2252,15 +2265,69 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
 
         return out.logits
 
+    def get_safety_logits(self, input_ids):
+        if self.safety_context["first_pass"]:
+            if self.safety_context["input_ids"] is None:
+                self.safety_context["input_ids"] = input_ids[:, -1:]
+            if self.safety_context["attention_mask"] is None:
+                self.safety_context["attention_mask"] = torch.ones_like(
+                    self.safety_context["input_ids"], dtype=torch.long
+                )
+            input_ids = self.safety_context["input_ids"]
+            attention_mask = self.safety_context["attention_mask"]
+            self.safety_context["first_pass"] = False
+        else:
+            attention_mask = torch.cat(
+                [
+                    self.safety_context["attention_mask"],
+                    torch.ones_like(input_ids[:, -1:], dtype=torch.long),
+                ],
+                dim=1,
+            )
+            if not self.safety_context["use_cache"]:
+                input_ids = torch.cat([self.safety_context["input_ids"], input_ids[:, -1:]], dim=1)
+            else:
+                input_ids = input_ids[:, -1:]
+            self.safety_context["input_ids"] = input_ids
+            self.safety_context["attention_mask"] = attention_mask
+
+        out = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            use_cache=self.safety_context["use_cache"],
+            past_key_values=self.safety_context["past_key_values"],
+        )
+        self.safety_context["past_key_values"] = out.get("past_key_values", None)
+
+        return out.logits
+
     def __call__(self, input_ids, scores):
         scores = torch.nn.functional.log_softmax(scores, dim=-1)
         if self.guidance_scale == 1:
             return scores
 
         logits = self.get_unconditional_logits(input_ids)
-
         unconditional_logits = torch.nn.functional.log_softmax(logits[:, -1], dim=-1)
-        scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
+        
+        # Get safety logits if safety context is provided
+        if self.safety_context["input_ids"] is not None:
+            safety_logits = self.get_safety_logits(input_ids)
+            safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
+            
+            # Apply safety guidance only when necessary (i.e., close to unsafe content)
+            guidance_scale_factor = torch.where(
+                (torch.abs(scores - safety_logits) >= self.sld_threshold), 
+                torch.tensor(self.guidance_scale), 
+                torch.tensor(self.guidance_scale * self.sld_guidance_decay)  # Decay guidance in safe regions
+            )
+            
+            # Apply guidance scale with decayed safety influence
+            scores_processed = guidance_scale_factor * (
+                (scores - unconditional_logits) - (safety_logits - unconditional_logits)
+            ) + unconditional_logits
+        else:
+            scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
+
         return scores_processed
 
 
