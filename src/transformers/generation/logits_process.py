@@ -2201,16 +2201,18 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
     def __init__(
         self,
         guidance_scale: float,
+        safety_scale: float,  
+        guidance_direction: int, 
         model,
         unconditional_ids: Optional[torch.LongTensor] = None,
         unconditional_attention_mask: Optional[torch.LongTensor] = None,
         safety_ids: Optional[torch.LongTensor] = None,
         safety_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
-        sld_threshold: float = 0.2,  # Introduce threshold for safety guidance
-        sld_guidance_decay: float = 0.95  # Gradually decay safety guidance
     ):
         self.guidance_scale = guidance_scale
+        self.safety_scale = safety_scale  
+        self.guidance_direction = guidance_direction  
         self.model = model
         self.unconditional_context = {
             "input_ids": unconditional_ids,
@@ -2226,8 +2228,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             "past_key_values": None,
             "first_pass": True,
         }
-        self.sld_threshold = sld_threshold
-        self.sld_guidance_decay = sld_guidance_decay  # Introduce decay factor
+
 
     def get_unconditional_logits(self, input_ids):
         if self.unconditional_context["first_pass"]:
@@ -2302,33 +2303,31 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         return out.logits
 
     def __call__(self, input_ids, scores):
-        scores = torch.nn.functional.log_softmax(scores, dim=-1)
-        if self.guidance_scale == 1:
-            return scores
-
+        # Calculate unconditional logits
         logits = self.get_unconditional_logits(input_ids)
         unconditional_logits = torch.nn.functional.log_softmax(logits[:, -1], dim=-1)
+
+        # Calculate the prompt guidance
+        scores = torch.nn.functional.log_softmax(scores, dim=-1)
+        prompt_guidance = self.guidance_scale * (scores - unconditional_logits)
         
-        # Get safety logits if safety context is provided
+        # Get safety guidance if provided
         if self.safety_context["input_ids"] is not None:
             safety_logits = self.get_safety_logits(input_ids)
             safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
-            
-            # Apply safety guidance only when necessary (i.e., close to unsafe content)
-            guidance_scale_factor = torch.where(
-                (torch.abs(scores - safety_logits) >= self.sld_threshold), 
-                torch.tensor(self.guidance_scale), 
-                torch.tensor(self.guidance_scale * self.sld_guidance_decay)  # Decay guidance in safe regions
-            )
-            
-            # Apply guidance scale with decayed safety influence
-            scores_processed = guidance_scale_factor * (
-                (scores - unconditional_logits) - (safety_logits - unconditional_logits)
-            ) + unconditional_logits
+            safety_guidance = self.safety_scale * (safety_logits - unconditional_logits)
         else:
-            scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
+            safety_guidance = torch.zeros_like(unconditional_logits)
 
-        return scores_processed
+        # Apply the guidance direction logic
+        if self.guidance_direction == 1:
+            final_guidance = prompt_guidance + safety_guidance
+        else:
+            final_guidance = prompt_guidance - safety_guidance
+
+        # Combine unconditional and final guidance
+        return unconditional_logits + final_guidance
+
 
 
 class BarkEosPrioritizerLogitsProcessor(LogitsProcessor):

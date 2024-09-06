@@ -729,6 +729,11 @@ class GenerationMixin:
         model_kwargs: Optional[Dict[str, Any]] = None,
         negative_prompt_ids: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        guidance_scale: float = 1.0,
+        safety_scale: float = 0.0,
+        guidance_direction: int = 1,
+        safety_ids: Optional[torch.Tensor] = None,
+        safety_attention_mask: Optional[torch.Tensor] = None,
     ) -> LogitsProcessorList:
         """
         This class returns a [`LogitsProcessorList`] list object that contains all relevant [`LogitsProcessor`]
@@ -740,11 +745,15 @@ class GenerationMixin:
         if generation_config.guidance_scale is not None and generation_config.guidance_scale != 1:
             processors.append(
                 UnbatchedClassifierFreeGuidanceLogitsProcessor(
-                    generation_config.guidance_scale,
-                    self,
+                    guidance_scale=generation_config.guidance_scale,
+                    safety_scale=safety_scale,
+                    guidance_direction=guidance_direction,
+                    model=self,
                     unconditional_ids=negative_prompt_ids,
                     unconditional_attention_mask=negative_prompt_attention_mask,
-                    use_cache=model_kwargs["use_cache"],
+                    safety_ids=safety_ids,
+                    safety_attention_mask=safety_attention_mask,
+                    use_cache=model_kwargs["use_cache"]                 
                 )
             )
         if generation_config.sequence_bias is not None:
@@ -1693,6 +1702,13 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         negative_prompt_ids: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        guidance_scale: float = 1.0,
+        safety_scale: float = 0.0,  
+        guidance_direction: int = 1,
+        unconditional_ids: Optional[torch.Tensor] = None,
+        unconditional_attention_mask: Optional[torch.Tensor] = None,
+        safety_ids: Optional[torch.Tensor] = None,
+        safety_attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         r"""
@@ -1920,6 +1936,11 @@ class GenerationMixin:
             model_kwargs=model_kwargs,
             negative_prompt_ids=negative_prompt_ids,
             negative_prompt_attention_mask=negative_prompt_attention_mask,
+            guidance_scale=guidance_scale,
+            safety_scale=safety_scale,
+            guidance_direction=guidance_direction,
+            safety_ids=safety_ids,
+            safety_attention_mask=safety_attention_mask,
         )
         prepared_stopping_criteria = self._get_stopping_criteria(
             generation_config=generation_config, stopping_criteria=stopping_criteria, tokenizer=tokenizer, **kwargs
