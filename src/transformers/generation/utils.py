@@ -742,10 +742,10 @@ class GenerationMixin:
         # instantiate processors list
         processors = LogitsProcessorList()
 
-        if generation_config.guidance_scale is not None and generation_config.guidance_scale != 1:
+        if guidance_scale is not None and guidance_scale != 1:            
             processors.append(
                 UnbatchedClassifierFreeGuidanceLogitsProcessor(
-                    guidance_scale=generation_config.guidance_scale,
+                    guidance_scale=guidance_scale,
                     safety_scale=safety_scale,
                     guidance_direction=guidance_direction,
                     model=self,
@@ -1794,6 +1794,7 @@ class GenerationMixin:
                     - [`~generation.GenerateEncoderDecoderOutput`],
                     - [`~generation.GenerateBeamEncoderDecoderOutput`]
         """
+        logger.info(f"Start Generate")
         # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
         self._validate_model_class()
         tokenizer = kwargs.pop("tokenizer", None)  # Pull this out first, we only use it for stopping criteria
@@ -1924,7 +1925,6 @@ class GenerationMixin:
                 " running `.generate()`.",
                 UserWarning,
             )
-
         # 9. prepare logits processors and stopping criteria
         prepared_logits_processor = self._get_logits_processor(
             generation_config=generation_config,
