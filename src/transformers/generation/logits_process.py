@@ -2304,17 +2304,14 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
 
     def __call__(self, input_ids, scores):
         # Calculate unconditional logits
-        logits = self.get_unconditional_logits(input_ids)
-        unconditional_logits = torch.nn.functional.log_softmax(logits[:, -1], dim=-1)
+        unconditional_logits = self.get_unconditional_logits(input_ids)[:, -1]
 
-        # Calculate the prompt guidance
-        scores = torch.nn.functional.log_softmax(scores, dim=-1)
-        prompt_guidance = self.guidance_scale * (scores - unconditional_logits)
-        
+        conditional_logits = torch.nn.functional.log_softmax(scores, dim=-1) 
+        prompt_guidance = self.guidance_scale * (conditional_logits - unconditional_logits)
+
         # Get safety guidance if provided
         if self.safety_context["input_ids"] is not None:
-            safety_logits = self.get_safety_logits(input_ids)
-            safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
+            safety_logits = self.get_safety_logits(input_ids)[:, -1]
             safety_guidance = self.safety_scale * (safety_logits - unconditional_logits)
         else:
             safety_guidance = torch.zeros_like(unconditional_logits)
@@ -2325,7 +2322,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         else:
             final_guidance = prompt_guidance - safety_guidance
 
-        # Combine unconditional and final guidance
+        # Combine unconditional logits and final guidance
         return unconditional_logits + final_guidance
 
 
