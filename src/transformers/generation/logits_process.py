@@ -2303,28 +2303,26 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         return out.logits
 
     def __call__(self, input_ids, scores):
-        # Calculate unconditional logits
-        unconditional_logits = self.get_unconditional_logits(input_ids)[:, -1]
-
-        conditional_logits = torch.nn.functional.log_softmax(scores, dim=-1) 
-        prompt_guidance = self.guidance_scale * (conditional_logits - unconditional_logits)
-
-        # Get safety guidance if provided
+        scores = torch.nn.functional.log_softmax(scores, dim=-1)
+        logits = self.get_unconditional_logits(input_ids)
+        unconditional_logits = torch.nn.functional.log_softmax(logits[:, -1], dim=-1)
+        # Compute safety guidance, if applicable
         if self.safety_context["input_ids"] is not None:
-            safety_logits = self.get_safety_logits(input_ids)[:, -1]
+            safety_logits = self.get_safety_logits(input_ids)
+            safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
             safety_guidance = self.safety_scale * (safety_logits - unconditional_logits)
+            # Final calculation based on safety factor and unconditional logits
+            if self.guidance_direction == 1:
+                final_guidance = scores + safety_guidance 
+            else:
+                final_guidance = scores - safety_guidance   
+            logger.warning("Safety guidance is applied")      
+            return final_guidance
         else:
-            safety_guidance = torch.zeros_like(unconditional_logits)
-
-        # Apply the guidance direction logic
-        if self.guidance_direction == 1:
-            final_guidance = prompt_guidance + safety_guidance
-        else:
-            final_guidance = prompt_guidance - safety_guidance
-
-        # Combine unconditional logits and final guidance
-        return unconditional_logits + final_guidance
-
+            if self.guidance_scale == 1:
+                return scores
+            scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
+            return scores_processed
 
 
 class BarkEosPrioritizerLogitsProcessor(LogitsProcessor):
