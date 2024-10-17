@@ -2209,6 +2209,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         safety_ids: Optional[torch.LongTensor] = None,
         safety_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
+        perplexity_threshold: float = 100.0,
     ):
         self.guidance_scale = guidance_scale
         self.safety_scale = safety_scale  
@@ -2228,7 +2229,8 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             "past_key_values": None,
             "first_pass": True,
         }
-
+        self.cumulative_log_probs = []
+        self.perplexity_threshold = perplexity_threshold
 
     def get_unconditional_logits(self, input_ids):
         if self.unconditional_context["first_pass"]:
@@ -2316,7 +2318,29 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
                 final_guidance = scores + safety_guidance 
             else:
                 final_guidance = scores - safety_guidance   
-            logger.warning("Safety guidance is applied")      
+            #logger.warning("Safety guidance is applied")
+
+            # compute probabilities from final logits
+            probs = torch.nn.functional.softmax(final_guidance, dim=-1)
+
+            # get the probabilities of the next tokens
+            next_token_probs, next_token_ids = torch.max(probs, dim=-1)
+
+            # accumulate the log probabilities
+            self.cumulative_log_probs.append(torch.log(next_token_probs + 1e-7))
+
+            # compute cumulative perplexity
+            avg_neg_log_prob = -torch.mean(torch.stack(self.cumulative_log_probs))
+            perplexity = torch.exp(avg_neg_log_prob)
+
+            logger.warning(f"Cumulative Perplexity: {perplexity.item()}")
+
+            # adjust safety scale if perplexity exceeds threshold
+            if perplexity.item() > self.perplexity_threshold:
+                logger.warning("Perplexity exceeded threshold. Adjusting safety scale.")
+                self.safety_scale *= 0.9 
+
+
             return final_guidance
         else:
             if self.guidance_scale == 1:
