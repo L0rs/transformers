@@ -2314,33 +2314,46 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         if self.safety_context["input_ids"] is not None:
             safety_logits = self.get_safety_logits(input_ids)
             safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
-            safety_guidance = self.safety_scale * (safety_logits - unconditional_logits)
-            logger.warning("Guidance Mode: " + self.guidance_mode)
-            if self.guidance_mode == "normal":
-                if self.guidance_direction == 1:
-                    final_guidance = scores + safety_guidance
-                else:
-                    final_guidance = scores - safety_guidance
-            
-            elif self.guidance_mode == "top10":
-                top10_mask = self.top10_mask(scores)
-                if self.guidance_direction == 1:
-                    final_guidance = scores + (top10_mask * safety_guidance)
-                else:
-                    final_guidance = scores - (top10_mask * safety_guidance)
-
+            mask = torch.ones_like(scores)
+            if self.guidance_mode == "top10":
+                mask = self.top10_mask(scores)
             elif self.guidance_mode == "mass95":
-                mass_mask = self.mass95_mask(scores)
-                if self.guidance_direction == 1:
-                    final_guidance = scores + (mass_mask * safety_guidance)
-                else:
-                    final_guidance = scores - (mass_mask * safety_guidance)
+                mask = self.mass95_mask(scores)
+            elif self.guidance_mode == "adaptive_mass_mask":
+                mask = self.adaptive_mass_mask(scores)
+            if self.guidance_direction == 1:
+                final_guidance = scores + self.safety_scale * mask * (safety_logits - unconditional_logits)
+            else:
+                final_guidance = scores - self.safety_scale * mask * (safety_logits - unconditional_logits)
             return final_guidance
         else:
             if self.guidance_scale == 1:
                 return scores
-            scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
-            return scores_processed
+            else:
+                scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
+                return scores_processed
+
+    def adaptive_mass_mask(self, scores, top_k=20):
+        probabilities = torch.exp(scores)
+        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True)
+
+        # determine adaptive threshold based on the highest values
+        if sorted_probs[0] > 0.7:  # top value is dominant
+            # fewer top values as we have one or two dominating probabilities
+            threshold_count = min(5, len(sorted_probs))
+        elif sorted_probs[0] > 0.5:  # moderate dominance in the top values
+            threshold_count = min(10, len(sorted_probs))
+        else:
+            # small probabilities, more evenly distributed, so take up to top 20
+            threshold_count = min(top_k, len(sorted_probs))
+
+        # mask with the selected threshold count
+        mass_mask = torch.zeros_like(scores)
+        mass_indices = sorted_indices[0, :threshold_count]
+        mass_mask[0, mass_indices] = 1
+        
+        return mass_mask
+
 
     def mass95_mask(self, scores):
         probabilities = torch.exp(scores)
@@ -2366,39 +2379,10 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         # get the top 10 indices
         #top_10_percent_cutoff = int(len(probabilities) * 0.1)  
         _, top_10_indices = torch.topk(probabilities[0], 10)  
-        
         # mask for applying safety guidance only to the top 10%
         top_10_mask = torch.zeros_like(scores)
         top_10_mask[0, top_10_indices] = 1 
         return top_10_mask
-
-    def compute_perplexity(self, final_guidance, input_ids):
-        # compute probabilities from final logits
-        probs = torch.nn.functional.softmax(final_guidance, dim=-1)
-
-        # get the probabilities of the next tokens
-        #next_token_probs, next_token_ids = torch.max(probs, dim=-1)
-        generated_tokens = input_ids[:, -1]
-
-        batch_indices = torch.arange(probs.size(0), device=probs.device)
-        next_token_probs = probs[batch_indices, generated_tokens]
-
-        # accumulate the log probabilities
-        #self.cumulative_log_probs.append(torch.log(next_token_probs + 1e-7))
-        log_probs = torch.log(next_token_probs + 1e-7)
-        self.total_log_prob += log_probs.sum().item()
-        self.total_tokens += generated_tokens.size(0)
-
-        # Compute cumulative perplexity
-        avg_neg_log_prob = -self.total_log_prob / self.total_tokens
-        perplexity = math.exp(avg_neg_log_prob)
-
-        logger.warning(f"Cumulative Perplexity: {perplexity.item()}")
-
-        # adjust safety scale if perplexity exceeds threshold
-        if perplexity > self.perplexity_threshold:
-            logger.warning("Perplexity exceeded threshold. Adjusting safety scale.")
-            self.safety_scale *= 0.9 
 
 
 class BarkEosPrioritizerLogitsProcessor(LogitsProcessor):
