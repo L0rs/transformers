@@ -2211,6 +2211,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         safety_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
         perplexity_threshold: float = 100.0,
+        safety_formula_type: str = "default"
     ):
         self.guidance_scale = guidance_scale
         self.safety_scale = safety_scale  
@@ -2233,6 +2234,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         }
         self.cumulative_log_probs = []
         self.perplexity_threshold = perplexity_threshold
+        self.safety_formula_type = safety_formula_type
 
     def get_unconditional_logits(self, input_ids):
         if self.unconditional_context["first_pass"]:
@@ -2322,9 +2324,20 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             elif self.guidance_mode == "adaptive_mass_mask":
                 mask = self.adaptive_mass_mask(scores)
             if self.guidance_direction == 1:
-                final_guidance = scores + self.safety_scale * mask * (safety_logits - unconditional_logits)
+                if self.safety_formula_type == "default":
+                    final_guidance = scores + self.safety_scale * mask * (safety_logits - unconditional_logits)
+                elif self.safety_formula_type == "new_safety_logits_only":
+                    final_guidance = scores + self.safety_scale * mask * safety_logits
+                elif self.safety_formula_type == "new_conditional_logits":
+                    final_guidance = scores + self.safety_scale * mask * (safety_logits - scores)
             else:
-                final_guidance = scores - self.safety_scale * mask * (safety_logits - unconditional_logits)
+                if self.safety_formula_type == "default":
+                    final_guidance = scores - self.safety_scale * mask * (safety_logits - unconditional_logits)
+                elif self.safety_formula_type == "new_safety_logits_only":
+                    final_guidance = scores - self.safety_scale * mask * safety_logits
+                elif self.safety_formula_type == "new_conditional_logits":
+                    final_guidance = scores - self.safety_scale * mask * (safety_logits - scores)
+
             return final_guidance
         else:
             if self.guidance_scale == 1:

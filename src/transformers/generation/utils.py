@@ -735,6 +735,7 @@ class GenerationMixin:
         guidance_direction: int = 1,
         safety_ids: Optional[torch.Tensor] = None,
         safety_attention_mask: Optional[torch.Tensor] = None,
+        safety_formula_type: str = "default",
     ) -> LogitsProcessorList:
         """
         This class returns a [`LogitsProcessorList`] list object that contains all relevant [`LogitsProcessor`]
@@ -755,7 +756,8 @@ class GenerationMixin:
                     unconditional_attention_mask=negative_prompt_attention_mask,
                     safety_ids=safety_ids,
                     safety_attention_mask=safety_attention_mask,
-                    use_cache=model_kwargs["use_cache"]                 
+                    use_cache=model_kwargs["use_cache"],  
+                    safety_formula_type=safety_formula_type,               
                 )
             )
         if generation_config.sequence_bias is not None:
@@ -1712,6 +1714,7 @@ class GenerationMixin:
         unconditional_attention_mask: Optional[torch.Tensor] = None,
         safety_ids: Optional[torch.Tensor] = None,
         safety_attention_mask: Optional[torch.Tensor] = None,
+        safety_formula_type: str = "default",
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         r"""
@@ -1945,6 +1948,7 @@ class GenerationMixin:
             guidance_direction=guidance_direction,
             safety_ids=safety_ids,
             safety_attention_mask=safety_attention_mask,
+            safety_formula_type=safety_formula_type,
         )
         prepared_stopping_criteria = self._get_stopping_criteria(
             generation_config=generation_config, stopping_criteria=stopping_criteria, tokenizer=tokenizer, **kwargs
