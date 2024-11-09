@@ -2338,14 +2338,14 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         sorted_probs, sorted_indices = torch.sort(probabilities, descending=True)
 
         # determine adaptive threshold based on the highest values
-        if sorted_probs[0] > 0.7:  # top value is dominant
+        if sorted_probs[0, 0] > 0.7:  # top value is dominant
             # fewer top values as we have one or two dominating probabilities
-            threshold_count = min(5, len(sorted_probs))
-        elif sorted_probs[0] > 0.5:  # moderate dominance in the top values
-            threshold_count = min(10, len(sorted_probs))
+            threshold_count = min(5, sorted_probs.size(1))
+        elif sorted_probs[0, 0] > 0.5:  # moderate dominance in the top values
+            threshold_count = min(10, sorted_probs.size(1))
         else:
             # small probabilities, more evenly distributed, so take up to top 20
-            threshold_count = min(top_k, len(sorted_probs))
+            threshold_count = min(top_k, sorted_probs.size(1))
 
         # mask with the selected threshold count
         mass_mask = torch.zeros_like(scores)
