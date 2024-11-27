@@ -2326,16 +2326,16 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             if self.guidance_direction == 1:
                 if self.safety_formula_type == "default":
                     final_guidance = scores + self.safety_scale * mask * (safety_logits - unconditional_logits)
-                elif self.safety_formula_type == "new_safety_logits_only":
+                elif self.safety_formula_type == "safety_logits_only":
                     final_guidance = scores + self.safety_scale * mask * safety_logits
-                elif self.safety_formula_type == "new_conditional_logits":
+                elif self.safety_formula_type == "conditional_logits":
                     final_guidance = scores + self.safety_scale * mask * (safety_logits - scores)
             else:
                 if self.safety_formula_type == "default":
                     final_guidance = scores - self.safety_scale * mask * (safety_logits - unconditional_logits)
-                elif self.safety_formula_type == "new_safety_logits_only":
+                elif self.safety_formula_type == "safety_logits_only":
                     final_guidance = scores - self.safety_scale * mask * safety_logits
-                elif self.safety_formula_type == "new_conditional_logits":
+                elif self.safety_formula_type == "conditional_logits":
                     final_guidance = scores - self.safety_scale * mask * (safety_logits - scores)
 
             return final_guidance
@@ -2348,53 +2348,47 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
 
     def adaptive_mass_mask(self, scores, top_k=20):
         probabilities = torch.exp(scores)
-        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True)
-
-        # determine adaptive threshold based on the highest values
-        if sorted_probs[0, 0] > 0.7:  # top value is dominant
-            # fewer top values as we have one or two dominating probabilities
-            threshold_count = min(5, sorted_probs.size(1))
-        elif sorted_probs[0, 0] > 0.5:  # moderate dominance in the top values
-            threshold_count = min(10, sorted_probs.size(1))
-        else:
-            # small probabilities, more evenly distributed, so take up to top 20
-            threshold_count = min(top_k, sorted_probs.size(1))
-
-        # mask with the selected threshold count
+        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True, dim=-1)
+        # Initialize mask with zeros
         mass_mask = torch.zeros_like(scores)
-        mass_indices = sorted_indices[0, :threshold_count]
-        mass_mask[0, mass_indices] = 1
-        
+        for i in range(scores.size(0)):  # Iterate over each sample in the batch
+            if sorted_probs[i, 0] > 0.7:
+                threshold_count = min(5, sorted_probs.size(1))
+            elif sorted_probs[i, 0] > 0.5:
+                threshold_count = min(10, sorted_probs.size(1))
+            else:
+                threshold_count = min(top_k, sorted_probs.size(1))    
+            mass_indices = sorted_indices[i, :threshold_count]
+            mass_mask[i, mass_indices] = 1 
         return mass_mask
 
 
     def mass95_mask(self, scores):
         probabilities = torch.exp(scores)
-        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True)
-        
+        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True, dim=-1)       
         # cumulative sum of probabilities
-        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-        
-        # index where cumulative probability exceeds 95%
-        mass_cutoff_index = torch.searchsorted(cumulative_probs[0], 0.95).item()
-        
-        mass_cutoff_index = min(mass_cutoff_index, cumulative_probs.size(-1) - 1)
-
-
-        # mask for the indices contributing to 95% probability mass
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)     
+        # Initialize mask with zeros
         mass_mask = torch.zeros_like(scores)
-        mass_indices = sorted_indices[0,:mass_cutoff_index + 1]
-        mass_mask[0, mass_indices] = 1  
+        
+        for i in range(scores.size(0)):  # Iterate over each sample in the batch
+            # Find the cutoff index where cumulative probability exceeds 95%
+            cutoff = torch.searchsorted(cumulative_probs[i], 0.95).item()
+            cutoff = min(cutoff, cumulative_probs.size(-1) - 1)
+            
+            # Apply mask up to the cutoff index
+            mass_indices = sorted_indices[i, :cutoff + 1]
+            mass_mask[i, mass_indices] = 1  
+        
         return mass_mask
 
     def top10_mask(self, scores):
         probabilities = torch.exp(scores)
-        # get the top 10 indices
-        #top_10_percent_cutoff = int(len(probabilities) * 0.1)  
-        _, top_10_indices = torch.topk(probabilities[0], 10)  
-        # mask for applying safety guidance only to the top 10%
+        # get the top 10 indices for each sample in the batch
+        _, top_10_indices = torch.topk(probabilities, 10, dim=-1)  
+        # mask for applying safety guidance only to the top 10
         top_10_mask = torch.zeros_like(scores)
-        top_10_mask[0, top_10_indices] = 1 
+        top_10_mask.scatter_(1, top_10_indices, 1)
         return top_10_mask
 
 
