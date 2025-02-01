@@ -2207,6 +2207,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         guidance_mode: str = "normal",
         unconditional_ids: Optional[torch.LongTensor] = None,
         unconditional_attention_mask: Optional[torch.LongTensor] = None,
+        safety_heads: Optional[dict] = None,
         safety_ids: Optional[torch.LongTensor] = None,
         safety_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
@@ -2235,6 +2236,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         self.cumulative_log_probs = []
         self.perplexity_threshold = perplexity_threshold
         self.safety_formula_type = safety_formula_type
+        self.safety_heads = safety_heads if safety_heads is not None else {}  # Dictionary of logits
 
     def get_unconditional_logits(self, input_ids):
         if self.unconditional_context["first_pass"]:
@@ -2314,7 +2316,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         unconditional_logits = torch.nn.functional.log_softmax(logits[:, -1], dim=-1)
         # Compute safety guidance, if applicable
         if self.safety_context["input_ids"] is not None:
-            safety_logits = self.get_safety_logits(input_ids)
+            safety_logits = self.compute_safety_logits(input_ids)
             safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
             mask = torch.ones_like(scores)
             if self.guidance_mode == "top10":
@@ -2346,6 +2348,26 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
                 scores_processed = self.guidance_scale * (scores - unconditional_logits) + unconditional_logits
                 return scores_processed
 
+    def compute_safety_logits(self, input_ids):
+        """
+        Computes multi-head safety logits or single safety logits.
+        """
+        # Case 1: Multi-Head Enabled
+        if self.safety_heads is not None:
+            safety_logits = torch.zeros_like(self.get_unconditional_logits(input_ids))
+
+            # Compute multi-head weighted sum
+            for category, (safety_ids, weight) in self.safety_heads.items():
+                if weight > 0:  # Apply only if probability is significant
+                    category_logits = self.get_safety_logits(safety_ids)  # Get logits for category
+                    safety_logits += weight * category_logits  # Weighted sum
+
+            return safety_logits
+
+        # Case 2: Single-Head Safety Logit
+        else:
+            return self.get_safety_logits(input_ids)  # Directly use single safety logit
+    
     def adaptive_mass_mask(self, scores, top_k=20):
         probabilities = torch.exp(scores)
         sorted_probs, sorted_indices = torch.sort(probabilities, descending=True, dim=-1)
