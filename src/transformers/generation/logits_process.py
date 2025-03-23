@@ -2211,12 +2211,15 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         safety_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
         perplexity_threshold: float = 100.0,
-        safety_formula_type: str = "default"
+        safety_formula_type: str = "default",
+        safety_heads: Optional[dict] = None,
+        threshold_mask = None
     ):
         self.guidance_scale = guidance_scale
         self.safety_scale = safety_scale  
         self.guidance_direction = guidance_direction  
         self.guidance_mode = guidance_mode # normal, top10, mass95
+        self.safety_heads = safety_heads 
         self.model = model
         self.unconditional_context = {
             "input_ids": unconditional_ids,
@@ -2235,6 +2238,7 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         self.cumulative_log_probs = []
         self.perplexity_threshold = perplexity_threshold
         self.safety_formula_type = safety_formula_type
+        self.threshold_mask = threshold_mask
 
     def get_unconditional_logits(self, input_ids):
         if self.unconditional_context["first_pass"]:
@@ -2313,29 +2317,35 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         logits = self.get_unconditional_logits(input_ids)
         unconditional_logits = torch.nn.functional.log_softmax(logits[:, -1], dim=-1)
         # Compute safety guidance, if applicable
-        if self.safety_context["input_ids"] is not None:
-            safety_logits = self.get_safety_logits(input_ids)
+        if self.safety_context["input_ids"] is not None or self.safety_heads is not None:
+            safety_logits = self.compute_safety_logits(input_ids)
             safety_logits = torch.nn.functional.log_softmax(safety_logits[:, -1], dim=-1)
             mask = torch.ones_like(scores)
             if self.guidance_mode == "top10":
-                mask = self.top10_mask(scores)
+                # mask = self.top10_mask(scores)
+                k = self.threshold_mask if self.threshold_mask else 10
+                mask = self.top_k_mask(scores, k)
             elif self.guidance_mode == "mass95":
-                mask = self.mass95_mask(scores)
+                # mask = self.mass95_mask(scores)
+                k = self.threshold_mask if self.threshold_mask else 0.95
+                mask = self.mass_x_mask(scores, k)
             elif self.guidance_mode == "adaptive_mass_mask":
-                mask = self.adaptive_mass_mask(scores)
+                # mask = self.adaptive_mass_mask(scores)
+                x = self.threshold_mask if self.threshold_mask else 20
+                mask = self.adaptive_mass_mask(scores, x)
             if self.guidance_direction == 1:
                 if self.safety_formula_type == "default":
                     final_guidance = scores + self.safety_scale * mask * (safety_logits - unconditional_logits)
-                elif self.safety_formula_type == "safety_logits_only":
+                elif self.safety_formula_type == "new_safety_logits_only":
                     final_guidance = scores + self.safety_scale * mask * safety_logits
-                elif self.safety_formula_type == "conditional_logits":
+                elif self.safety_formula_type == "new_conditional_logits":
                     final_guidance = scores + self.safety_scale * mask * (safety_logits - scores)
             else:
                 if self.safety_formula_type == "default":
                     final_guidance = scores - self.safety_scale * mask * (safety_logits - unconditional_logits)
-                elif self.safety_formula_type == "safety_logits_only":
+                elif self.safety_formula_type == "new_safety_logits_only":
                     final_guidance = scores - self.safety_scale * mask * safety_logits
-                elif self.safety_formula_type == "conditional_logits":
+                elif self.safety_formula_type == "new_conditional_logits":
                     final_guidance = scores - self.safety_scale * mask * (safety_logits - scores)
 
             return final_guidance
@@ -2362,6 +2372,26 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             mass_mask[i, mass_indices] = 1 
         return mass_mask
 
+    def compute_safety_logits(self, input_ids):
+        """
+        Computes multi-head safety logits or single safety logits.
+        """
+        # Case 1: Multi-Head Enabled
+        if self.safety_heads is not None:
+            safety_logits = torch.zeros_like(self.get_unconditional_logits(input_ids))
+
+            # Compute multi-head weighted sum
+            for category, (safety_ids, weight) in self.safety_heads.items():
+                if weight > 0:  # Apply only if probability is significant
+                    category_logits = self.get_safety_logits(safety_ids)  # Get logits for category
+                    safety_logits += weight * category_logits  # Weighted sum
+
+            return safety_logits
+
+        # Case 2: Single-Head Safety Logit
+        else:
+            return self.get_safety_logits(input_ids)  # Directly use single safety logit
+        
 
     def mass95_mask(self, scores):
         probabilities = torch.exp(scores)
@@ -2391,6 +2421,82 @@ class UnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         top_10_mask.scatter_(1, top_10_indices, 1)
         return top_10_mask
 
+
+    def adaptive_mass_mask(self, scores: torch.FloatTensor, top_k: int = 20) -> torch.FloatTensor:
+        """
+        Creates an adaptive mass mask based on the distribution of probabilities.
+
+        Args:
+            scores (`torch.FloatTensor`):
+                Logits scores before softmax. Shape: `(batch_size, vocab_size)`.
+            top_k (`int`, *optional*, defaults to `20`):
+                Maximum number of top tokens to include in the mask.
+
+        Returns:
+            `torch.FloatTensor`: Mass mask with ones in positions to apply safety guidance. Shape: `(batch_size, vocab_size)`.
+        """
+        probabilities = torch.exp(scores)
+        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True, dim=-1)
+        
+        # Initialize mask with zeros
+        mass_mask = torch.zeros_like(scores)
+        
+        for i in range(scores.size(0)):  # Iterate over each sample in the batch
+            if sorted_probs[i, 0] > 0.7:
+                threshold_count = min(5, sorted_probs.size(1))
+            elif sorted_probs[i, 0] > 0.5:
+                threshold_count = min(10, sorted_probs.size(1))
+            else:
+                threshold_count = min(top_k, sorted_probs.size(1))
+            
+            mass_indices = sorted_indices[i, :threshold_count]
+            mass_mask[i, mass_indices] = 1
+        
+        return mass_mask
+    
+    def mass_x_mask(self, scores: torch.FloatTensor, threshold: float = 0.95) -> torch.FloatTensor:
+        """
+        Creates a mask for tokens contributing to X% of the probability mass.
+
+        Args:
+            scores (`torch.FloatTensor`): Logits scores before softmax. Shape: `(batch_size, vocab_size)`.
+            threshold (`float`, optional, defaults to `0.95`): Probability mass threshold.
+
+        Returns:
+            `torch.FloatTensor`: Mask with ones in positions contributing to X% mass.
+        """
+        probabilities = torch.exp(scores)
+        sorted_probs, sorted_indices = torch.sort(probabilities, descending=True, dim=-1)
+
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)  # Compute cumulative sum
+        mass_mask = torch.zeros_like(scores)
+
+        for i in range(scores.size(0)):  
+            cutoff = torch.searchsorted(cumulative_probs[i], threshold).item()
+            cutoff = min(cutoff, cumulative_probs.size(-1) - 1)
+
+            mass_indices = sorted_indices[i, :cutoff + 1]
+            mass_mask[i, mass_indices] = 1  
+
+        return mass_mask
+    
+    def top_k_mask(self, scores: torch.FloatTensor, top_k: int = 10) -> torch.FloatTensor:
+        """
+        Creates a mask to include only the top K tokens.
+
+        Args:
+            scores (`torch.FloatTensor`): Logits scores before softmax. Shape: `(batch_size, vocab_size)`.
+            top_k (`int`, optional, defaults to `10`): Number of top tokens to retain.
+
+        Returns:
+            `torch.FloatTensor`: Top-K mask with ones in top positions.
+        """
+        probabilities = torch.exp(scores)
+        _, top_k_indices = torch.topk(probabilities, top_k, dim=-1)
+
+        top_k_mask = torch.zeros_like(scores)
+        top_k_mask.scatter_(1, top_k_indices, 1)  # Set selected positions to 1
+        return top_k_mask
 
 class BarkEosPrioritizerLogitsProcessor(LogitsProcessor):
     r"""This processor ensures that the EOS token is selected if its probability is greater than the `min_eos_p`.
